@@ -1,0 +1,480 @@
+// After Effects Preset Distributor
+// This script creates a UI to choose an animation preset, select a control layer,
+// and apply the preset to all layers with a similar naming convention
+// with ALL keyframes offset based on each layer's in-point
+
+(function() {
+    // Build the UI
+    var win = new Window("dialog", "Preset Distributor");
+    win.orientation = "column";
+    win.alignChildren = "fill";
+
+    // Group for preset selection
+    var presetGroup = win.add("group");
+    presetGroup.orientation = "row";
+    presetGroup.alignChildren = "left";
+    presetGroup.add("statictext", undefined, "Animation Preset:");
+    var presetPath = presetGroup.add("edittext", undefined, "");
+    presetPath.preferredSize.width = 250;
+    var browseButton = presetGroup.add("button", undefined, "Browse...");
+
+    // Group for control layer selection
+    var controlGroup = win.add("group");
+    controlGroup.orientation = "row";
+    controlGroup.alignChildren = "left";
+    controlGroup.add("statictext", undefined, "Control Layer:");
+    var controlLayerDropdown = controlGroup.add("dropdownlist");
+    controlLayerDropdown.preferredSize.width = 250;
+    populateLayerDropdown();
+
+    // Group for naming pattern
+    var namingGroup = win.add("group");
+    namingGroup.orientation = "row";
+    namingGroup.alignChildren = "left";
+    namingGroup.add("statictext", undefined, "Base Name Pattern:");
+    var namingPattern = namingGroup.add("edittext", undefined, "");
+    namingPattern.preferredSize.width = 250;
+    
+    // Timing options
+    var timingPanel = win.add("panel", undefined, "Timing Options");
+    timingPanel.orientation = "column";
+    timingPanel.alignChildren = "left";
+    
+    var relativeTimingCheckbox = timingPanel.add("checkbox", undefined, "Apply animation relative to layer in-point");
+    relativeTimingCheckbox.value = true;
+    
+    var preserveDurationCheckbox = timingPanel.add("checkbox", undefined, "Preserve animation duration");
+    preserveDurationCheckbox.value = true;
+    
+    // Info text
+    var infoText = win.add("statictext", undefined, "The script will extract the base name from the control layer and apply the preset to all layers with the same base name pattern. All animated properties will be offset based on each layer's in-point.", {multiline: true});
+    infoText.preferredSize.width = 350;
+
+    // Buttons group
+    var buttonGroup = win.add("group");
+    buttonGroup.orientation = "row";
+    buttonGroup.alignChildren = "center";
+    var applyButton = buttonGroup.add("button", undefined, "Apply Preset");
+    var cancelButton = buttonGroup.add("button", undefined, "Cancel");
+
+    // Event handlers
+    browseButton.onClick = function() {
+        var presetFile = File.openDialog("Select an Animation Preset", "Animation Presets:*.ffx");
+        if (presetFile) {
+            presetPath.text = presetFile.fsName;
+        }
+    };
+
+    controlLayerDropdown.onChange = function() {
+        // When a control layer is selected, automatically populate the naming pattern field
+        if (controlLayerDropdown.selection) {
+            var selectedLayerName = controlLayerDropdown.selection.text;
+            var baseNamePattern = extractBaseNamePattern(selectedLayerName);
+            namingPattern.text = baseNamePattern;
+        }
+    };
+
+    applyButton.onClick = function() {
+        applyPresetToLayers();
+    };
+
+    cancelButton.onClick = function() {
+        win.close();
+    };
+
+    // Function to populate layer dropdown
+    function populateLayerDropdown() {
+        controlLayerDropdown.removeAll();
+        
+        if (app.project.activeItem && app.project.activeItem instanceof CompItem) {
+            var comp = app.project.activeItem;
+            for (var i = 1; i <= comp.numLayers; i++) {
+                controlLayerDropdown.add("item", comp.layer(i).name);
+            }
+            
+            if (controlLayerDropdown.items.length > 0) {
+                controlLayerDropdown.selection = 0;
+            }
+        }
+    }
+
+    // Function to extract base name pattern from a layer name
+    function extractBaseNamePattern(layerName) {
+        // This function attempts to find a pattern in the layer name
+        // For example, "Title 1" would return "Title "
+        var pattern = layerName.replace(/[0-9]+$/, "");
+        return pattern;
+    }
+
+    // Function to apply the preset to layers with matching pattern
+    function applyPresetToLayers() {
+        // Check if all required inputs are provided
+        if (!presetPath.text) {
+            alert("Please select an animation preset.");
+            return;
+        }
+        
+        if (!controlLayerDropdown.selection) {
+            alert("Please select a control layer.");
+            return;
+        }
+        
+        if (!namingPattern.text) {
+            alert("Please specify a base name pattern.");
+            return;
+        }
+        
+        // Check if preset file exists
+        var presetFile = new File(presetPath.text);
+        if (!presetFile.exists) {
+            alert("The selected preset file does not exist.");
+            return;
+        }
+        
+        // Get active composition
+        if (!(app.project.activeItem && app.project.activeItem instanceof CompItem)) {
+            alert("Please select a composition.");
+            return;
+        }
+        
+        var comp = app.project.activeItem;
+        var controlLayerName = controlLayerDropdown.selection.text;
+        var pattern = namingPattern.text;
+        var controlLayer = null;
+        var affectedLayers = [];
+        
+        // Find the control layer and layers with matching pattern
+        for (var i = 1; i <= comp.numLayers; i++) {
+            var layer = comp.layer(i);
+            
+            if (layer.name === controlLayerName) {
+                controlLayer = layer;
+            }
+            
+            if (layer.name.indexOf(pattern) === 0) {
+                affectedLayers.push(layer);
+            }
+        }
+        
+        if (!controlLayer) {
+            alert("Control layer not found in the active composition.");
+            return;
+        }
+        
+        // Begin undo group
+        app.beginUndoGroup("Apply Preset to Layers");
+        
+        try {
+            // Store the initial state of the control layer (in-point)
+            var controlInPoint = controlLayer.inPoint;
+            
+            // Apply preset to control layer first
+            controlLayer.selected = true;
+            if (!applyPresetToLayer(controlLayer, presetFile)) {
+                alert("Failed to apply preset to the control layer.");
+                app.endUndoGroup();
+                return;
+            }
+            
+            // Delay to ensure the preset is fully applied
+            app.project.activeItem.time = app.project.activeItem.time;
+            
+            // Get a snapshot of the control layer's property structure and keyframes
+            var controlSnapshot = captureLayerSnapshot(controlLayer);
+            
+            // Apply preset to other layers
+            var appliedCount = 0;
+            for (var i = 0; i < affectedLayers.length; i++) {
+                var layer = affectedLayers[i];
+                
+                // Skip the control layer as we've already processed it
+                if (layer.name === controlLayerName) {
+                    continue;
+                }
+                
+                layer.selected = true;
+                if (applyPresetToLayer(layer, presetFile)) {
+                    // If we're applying keyframes relative to layer in-point
+                    if (relativeTimingCheckbox.value) {
+                        applySnapshotWithOffset(layer, controlSnapshot, controlInPoint, preserveDurationCheckbox.value);
+                    }
+                    appliedCount++;
+                }
+                layer.selected = false;
+            }
+            
+            alert("Preset applied to " + (appliedCount + 1) + " layers with timing adjusted.");
+        } catch (e) {
+            alert("Error: " + e.toString());
+        } finally {
+            app.endUndoGroup();
+            win.close();
+        }
+    }
+
+    // Function to apply preset to a single layer
+    function applyPresetToLayer(layer, presetFile) {
+        try {
+            layer.selected = true;
+            
+            // We need to use evalScript to apply the preset because there's no direct API
+            var script = "var activeComp = app.project.activeItem;\n" +
+                         "var selectedLayers = activeComp.selectedLayers;\n" +
+                         "if (selectedLayers.length > 0) {\n" +
+                         "    var layer = selectedLayers[0];\n" +
+                         "    var presetFile = new File('" + presetFile.fsName.replace(/\\/g, "\\\\") + "');\n" +
+                         "    layer.applyPreset(presetFile);\n" +
+                         "    true;\n" + // return value
+                         "} else {\n" +
+                         "    false;\n" + // return value
+                         "}";
+            
+            return eval(script);
+        } catch (e) {
+            alert("Error applying preset to layer " + layer.name + ": " + e.toString());
+            return false;
+        }
+    }
+    
+    // Comprehensive function to capture all properties and keyframes from a layer
+    function captureLayerSnapshot(layer) {
+        var snapshot = {
+            inPoint: layer.inPoint,
+            properties: []
+        };
+        
+        // Helper function to recursively traverse and capture properties
+        function capturePropertyTree(prop, path) {
+            if (!prop) return; // Add null check
+            
+            for (var i = 1; i <= prop.numProperties; i++) {
+                var subProp = prop.property(i);
+                if (!subProp) continue; // Add null check
+                
+                var subPath = path ? path + "." + subProp.matchName : subProp.matchName;
+                
+                if (subProp.numProperties > 0) {
+                    // This is a property group, recurse
+                    capturePropertyTree(subProp, subPath);
+                } else if (subProp.canSetExpression) {
+                    // This is an actual property that might have keyframes
+                    var propData = {
+                        path: subPath,
+                        name: subProp.name,
+                        matchName: subProp.matchName,
+                        parentName: prop.name,
+                        keyframes: [],
+                        hasKeyframes: false
+                    };
+                    
+                    // Capture keyframes if they exist
+                    if (subProp.numKeys > 0) {
+                        propData.hasKeyframes = true;
+                        
+                        for (var j = 1; j <= subProp.numKeys; j++) {
+                            var keyframe = {
+                                time: subProp.keyTime(j),
+                                value: subProp.keyValue(j)
+                            };
+                            
+                            // Try to capture keyframe interpolation and other properties
+                            try {
+                                keyframe.inInterpolationType = subProp.keyInInterpolationType(j);
+                                keyframe.outInterpolationType = subProp.keyOutInterpolationType(j);
+                                
+                                // Capture temporal ease for properties that support it
+                                if (subProp.value instanceof Array && subProp.value.length > 0) {
+                                    keyframe.temporalEaseIn = subProp.keyInTemporalEase(j);
+                                    keyframe.temporalEaseOut = subProp.keyOutTemporalEase(j);
+                                }
+                            } catch (e) {
+                                // Some properties don't support all keyframe attributes
+                            }
+                            
+                            propData.keyframes.push(keyframe);
+                        }
+                    }
+                    
+                    // Add property to snapshot
+                    snapshot.properties.push(propData);
+                }
+            }
+        }
+        
+        // Start capturing properties
+        capturePropertyTree(layer, "");
+        
+        // Special handling for text animators
+        try {
+            if (layer.property("ADBE Text Properties") && 
+                layer.property("ADBE Text Properties").property("ADBE Text Animators")) {
+                var textAnimators = layer.property("ADBE Text Properties").property("ADBE Text Animators");
+                if (textAnimators) {
+                    capturePropertyTree(textAnimators, "ADBE Text Properties.ADBE Text Animators");
+                }
+            }
+        } catch (e) {
+            // Handle case where text properties don't exist
+        }
+        
+        return snapshot;
+    }
+    
+    // Function to find a property by path
+    function findPropertyByPath(layer, path) {
+        if (!layer || !path) return null; // Add null check
+        
+        var parts = path.split(".");
+        var current = layer;
+        
+        for (var i = 0; i < parts.length; i++) {
+            if (!current) return null; // Add null check
+            
+            var matchName = parts[i];
+            var found = false;
+            
+            // Try to find property by matchName
+            for (var j = 1; j <= current.numProperties; j++) {
+                try {
+                    if (current.property(j) && current.property(j).matchName === matchName) {
+                        current = current.property(j);
+                        found = true;
+                        break;
+                    }
+                } catch (e) {
+                    // Skip if property access fails
+                    continue;
+                }
+            }
+            
+            if (!found) {
+                // If not found by matchName, try by name or index
+                try {
+                    current = current.property(matchName);
+                    found = true;
+                } catch (e) {
+                    // Not found by name or matchName
+                    return null;
+                }
+            }
+        }
+        
+        return current;
+    }
+    
+    // Unified function to apply snapshot data with offset
+    function applySnapshotWithOffset(layer, snapshot, controlInPoint, preserveDuration) {
+        if (!layer || !snapshot) return;
+        
+        // Get the layer's in-point
+        var layerInPoint = layer.inPoint;
+        
+        // Calculate the offset
+        var offset = layerInPoint - controlInPoint;
+        
+        // Function to recursively adjust a property and its children
+        function adjustPropertyAndChildren(prop, parentPath) {
+            if (!prop) return;
+            
+            var path = parentPath ? parentPath + "." + prop.matchName : prop.matchName;
+            
+            // If this is a property group, recurse to children
+            if (prop.numProperties > 0) {
+                for (var i = 1; i <= prop.numProperties; i++) {
+                    try {
+                        var childProp = prop.property(i);
+                        if (childProp) {
+                            adjustPropertyAndChildren(childProp, path);
+                        }
+                    } catch (e) {
+                        // Skip if can't access property
+                    }
+                }
+            } 
+            // If this is a property that can have keyframes
+            else if (prop.canSetExpression) {
+                // Process keyframes if they exist
+                if (prop.numKeys > 0) {
+                    // Store keyframe data
+                    var keyframes = [];
+                    for (var i = 1; i <= prop.numKeys; i++) {
+                        var keyframe = {
+                            time: prop.keyTime(i),
+                            value: prop.keyValue(i)
+                        };
+                        
+                        // Capture keyframe interpolation and other properties if available
+                        try {
+                            keyframe.inInterpolationType = prop.keyInInterpolationType(i);
+                            keyframe.outInterpolationType = prop.keyOutInterpolationType(i);
+                            
+                            // Capture temporal ease
+                            if (prop.value instanceof Array && prop.value.length > 0) {
+                                keyframe.temporalEaseIn = prop.keyInTemporalEase(i);
+                                keyframe.temporalEaseOut = prop.keyOutTemporalEase(i);
+                            }
+                        } catch (e) {
+                            // Some properties don't support all keyframe attributes
+                        }
+                        
+                        keyframes.push(keyframe);
+                    }
+                    
+                    // Calculate animation duration
+                    var animDuration = 0;
+                    if (preserveDuration && keyframes.length > 1) {
+                        animDuration = keyframes[keyframes.length - 1].time - keyframes[0].time;
+                    }
+                    
+                    // Remove all existing keyframes
+                    while (prop.numKeys > 0) {
+                        prop.removeKey(1);
+                    }
+                    
+                    // Add new keyframes with adjusted timing
+                    for (var i = 0; i < keyframes.length; i++) {
+                        var kf = keyframes[i];
+                        var newTime;
+                        
+                        if (preserveDuration && animDuration > 0) {
+                            // Calculate the relative position of this keyframe in the original animation
+                            var relativePosition = (kf.time - keyframes[0].time) / animDuration;
+                            // Apply the same relative position to the new animation starting at the offset point
+                            newTime = layerInPoint + (relativePosition * animDuration);
+                        } else {
+                            // Simple offset
+                            newTime = kf.time + offset;
+                        }
+                        
+                        // Add the keyframe
+                        try {
+                            var keyIndex = prop.addKey(newTime);
+                            prop.setValueAtKey(keyIndex, kf.value);
+                            
+                            // Restore keyframe interpolation and ease
+                            if (kf.inInterpolationType !== undefined) {
+                                try {
+                                    if (kf.temporalEaseIn && kf.temporalEaseOut) {
+                                        prop.setTemporalEaseAtKey(keyIndex, kf.temporalEaseIn, kf.temporalEaseOut);
+                                    }
+                                    prop.setInterpolationTypeAtKey(keyIndex, kf.inInterpolationType, kf.outInterpolationType);
+                                } catch (e) {
+                                    // Some properties don't support all keyframe attributes
+                                }
+                            }
+                        } catch (e) {
+                            // Skip if adding keyframe fails
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Start with the entire layer and process all properties recursively
+        adjustPropertyAndChildren(layer, "");
+    }
+
+    // Center and show the window
+    win.center();
+    win.show();
+})();
