@@ -1,0 +1,1016 @@
+// After Effects Preset Distributor
+// This script creates a dockable panel to choose animation presets, select a control layer,
+// and apply presets to all layers with a similar naming convention
+// with ALL keyframes offset based on each layer's in-point or out-point
+// With support for nested compositions, brand folders, and multiple presets
+
+(function(thisObj) {
+    // Build the UI as a dockable panel
+    function buildUI(thisObj) {
+        // IMPROVED: Set a minimum size for the panel and make it resizable
+        var win = (thisObj instanceof Panel) ? 
+            thisObj : 
+            new Window("palette", "Preset Distributor", undefined, {resizeable: true});
+            
+        win.orientation = "column";
+        win.alignChildren = ["fill", "top"];
+        win.spacing = 5;
+        win.margins = 16;
+        
+        // IMPROVED: Set minimum size for the panel
+        win.minimumSize = [450, 650];
+        
+        // Group for preset selection methods
+        var presetMethodPanel = win.add("panel", undefined, "Preset Selection Method");
+        presetMethodPanel.orientation = "column";
+        presetMethodPanel.alignChildren = ["left", "top"];
+        presetMethodPanel.margins = 12;
+        
+        var directSelectRadio = presetMethodPanel.add("radiobutton", undefined, "Select Preset File Directly");
+        var brandFolderRadio = presetMethodPanel.add("radiobutton", undefined, "Use Brand Folders");
+        directSelectRadio.value = true; // Default selection
+        
+        // Group for direct preset selection (original method)
+        var presetGroup = win.add("group");
+        presetGroup.orientation = "row";
+        presetGroup.alignChildren = ["left", "center"];
+        presetGroup.spacing = 5;
+        
+        // IMPROVED: Fixed width for labels to align fields
+        var presetLabel = presetGroup.add("statictext", undefined, "Animation Preset:");
+        presetLabel.preferredSize.width = 100;
+        
+        // IMPROVED: Allow the textfield to expand with the panel
+        var presetPath = presetGroup.add("edittext", undefined, "");
+        presetPath.alignment = ["fill", "center"];
+        presetPath.preferredSize.width = 250;
+        
+        var browseButton = presetGroup.add("button", undefined, "Browse...");
+        browseButton.preferredSize.width = 80;
+
+        // Group for brand folder selection - IMPROVED LAYOUT
+        var brandFolderGroup = win.add("panel", undefined, "Brand Folder Selection");
+        brandFolderGroup.orientation = "column";
+        brandFolderGroup.alignChildren = ["fill", "top"];
+        brandFolderGroup.margins = 12;
+        brandFolderGroup.spacing = 8;
+        
+        // First row: Brand folder path
+        var brandFolderRow = brandFolderGroup.add("group");
+        brandFolderRow.orientation = "row";
+        brandFolderRow.alignChildren = ["left", "center"];
+        brandFolderRow.spacing = 5;
+        
+        // IMPROVED: Fixed width for labels to align fields
+        var brandFolderLabel = brandFolderRow.add("statictext", undefined, "Brands Folder:");
+        brandFolderLabel.preferredSize.width = 100;
+        
+        // IMPROVED: Allow the textfield to expand with the panel
+        var brandFolderPath = brandFolderRow.add("edittext", undefined, "");
+        brandFolderPath.alignment = ["fill", "center"];
+        brandFolderPath.preferredSize.width = 250;
+        
+        var brandFolderBrowseButton = brandFolderRow.add("button", undefined, "Browse...");
+        brandFolderBrowseButton.preferredSize.width = 80;
+        
+        // Second row: Brand selection
+        var brandSelectionRow = brandFolderGroup.add("group");
+        brandSelectionRow.orientation = "row";
+        brandSelectionRow.alignChildren = ["left", "center"];
+        brandSelectionRow.spacing = 5;
+        
+        // IMPROVED: Fixed width for labels to align fields
+        var brandLabel = brandSelectionRow.add("statictext", undefined, "Select Brand:");
+        brandLabel.preferredSize.width = 100;
+        
+        // IMPROVED: Allow the dropdown to expand with the panel
+        var brandDropdown = brandSelectionRow.add("dropdownlist");
+        brandDropdown.alignment = ["fill", "center"];
+        brandDropdown.preferredSize.width = 250;
+        
+        var refreshBrandsButton = brandSelectionRow.add("button", undefined, "Refresh");
+        refreshBrandsButton.preferredSize.width = 80;
+        
+        // NEW: Multiple presets list box with improved layout
+        var presetsListPanel = brandFolderGroup.add("panel", undefined, "Available Presets");
+        presetsListPanel.orientation = "column";
+        presetsListPanel.alignChildren = ["fill", "top"];
+        presetsListPanel.margins = 12;
+        
+        var presetsListBox = presetsListPanel.add("listbox", undefined, [], {multiselect: true});
+        presetsListBox.alignment = ["fill", "fill"];
+        presetsListBox.preferredSize.width = 350;
+        presetsListBox.preferredSize.height = 120;
+        
+        // Initially disable brand folder selection
+        brandFolderGroup.enabled = false;
+        
+        // Toggle between preset selection methods
+        directSelectRadio.onClick = function() {
+            presetGroup.enabled = true;
+            brandFolderGroup.enabled = false;
+        };
+        
+        brandFolderRadio.onClick = function() {
+            presetGroup.enabled = false;
+            brandFolderGroup.enabled = true;
+        };
+
+        // Group for control layer selection - replaced dropdown with button and display text
+        var controlGroup = win.add("group");
+        controlGroup.orientation = "row";
+        controlGroup.alignChildren = ["left", "center"];
+        controlGroup.spacing = 5;
+        
+        // IMPROVED: Fixed width for labels to align fields
+        var controlLabel = controlGroup.add("statictext", undefined, "Control Layer:");
+        controlLabel.preferredSize.width = 100;
+        
+        // Text field to display selected layer name
+        var selectedLayerText = controlGroup.add("statictext", undefined, "No layer selected");
+        selectedLayerText.alignment = ["fill", "center"];
+        selectedLayerText.preferredSize.width = 250;
+        
+        // Button to use currently selected layer
+        var useSelectedLayerButton = controlGroup.add("button", undefined, "Use Selected Layer");
+        useSelectedLayerButton.preferredSize.width = 110;
+        useSelectedLayerButton.onClick = function() {
+            getSelectedLayer();
+        };
+        
+        // Variable to store the selected control layer
+        var controlLayer = null;
+        
+        // Function to get the currently selected layer
+        function getSelectedLayer() {
+            if (app.project.activeItem && app.project.activeItem instanceof CompItem) {
+                var comp = app.project.activeItem;
+                var selectedLayers = comp.selectedLayers;
+                
+                if (selectedLayers.length > 0) {
+                    // Use the first selected layer
+                    controlLayer = selectedLayers[0];
+                    selectedLayerText.text = controlLayer.name;
+                    
+                    // Auto-populate the naming pattern
+                    var baseNamePattern = extractBaseNamePattern(controlLayer.name);
+                    namingPattern.text = baseNamePattern;
+                } else {
+                    alert("No layer selected. Please select a layer in the composition.");
+                    selectedLayerText.text = "No layer selected";
+                    controlLayer = null;
+                }
+            } else {
+                alert("Please select a composition first.");
+                selectedLayerText.text = "No composition active";
+                controlLayer = null;
+            }
+        }
+        
+        // Group for naming pattern
+        var namingGroup = win.add("group");
+        namingGroup.orientation = "row";
+        namingGroup.alignChildren = ["left", "center"];
+        namingGroup.spacing = 5;
+        
+        // IMPROVED: Fixed width for labels to align fields
+        var namingLabel = namingGroup.add("statictext", undefined, "Base Name Pattern:");
+        namingLabel.preferredSize.width = 100;
+        
+        var namingPattern = namingGroup.add("edittext", undefined, "");
+        namingPattern.alignment = ["fill", "center"];
+        namingPattern.preferredSize.width = 250;
+        
+        // Timing options with improved layout
+        var timingPanel = win.add("panel", undefined, "Timing Options");
+        timingPanel.orientation = "column";
+        timingPanel.alignChildren = ["left", "top"];
+        timingPanel.margins = 12;
+        timingPanel.spacing = 8;
+        
+        // Radio buttons for relative timing reference point (beginning or end)
+        var timingReferenceGroup = timingPanel.add("group");
+        timingReferenceGroup.orientation = "row";
+        timingReferenceGroup.alignChildren = ["left", "center"];
+        timingReferenceGroup.spacing = 5;
+        
+        var referenceLabel = timingReferenceGroup.add("statictext", undefined, "Apply animation relative to:");
+        referenceLabel.preferredSize.width = 150;
+        
+        var inPointRadio = timingReferenceGroup.add("radiobutton", undefined, "Layer In-point");
+        var outPointRadio = timingReferenceGroup.add("radiobutton", undefined, "Layer Out-point");
+        inPointRadio.value = true; // Default selection
+        
+        var relativeTimingCheckbox = timingPanel.add("checkbox", undefined, "Apply animation relative to layer timing");
+        relativeTimingCheckbox.value = true;
+        
+        var preserveDurationCheckbox = timingPanel.add("checkbox", undefined, "Preserve animation duration");
+        preserveDurationCheckbox.value = true;
+        
+        // Nested composition options with improved layout
+        var nestedPanel = win.add("panel", undefined, "Nested Composition Options");
+        nestedPanel.orientation = "column";
+        nestedPanel.alignChildren = ["left", "top"];
+        nestedPanel.margins = 12;
+        nestedPanel.spacing = 8;
+        
+        var processNestedCheckbox = nestedPanel.add("checkbox", undefined, "Process nested compositions");
+        processNestedCheckbox.value = true;
+        
+        var recursiveCheckbox = nestedPanel.add("checkbox", undefined, "Recursively process all nested compositions");
+        recursiveCheckbox.value = false;
+        
+        var depthPanel = nestedPanel.add("group");
+        depthPanel.orientation = "row";
+        depthPanel.alignChildren = ["left", "center"];
+        depthPanel.spacing = 5;
+        
+        var depthLabel = depthPanel.add("statictext", undefined, "Max depth level:");
+        depthLabel.preferredSize.width = 100;
+        
+        var depthInput = depthPanel.add("edittext", undefined, "3");
+        depthInput.preferredSize.width = 50;
+        
+        // Enable/disable depth input based on recursive checkbox
+        recursiveCheckbox.onClick = function() {
+            depthPanel.enabled = recursiveCheckbox.value;
+        };
+        depthPanel.enabled = recursiveCheckbox.value;
+        
+        // Info text
+        var infoText = win.add("statictext", undefined, "The script will extract the base name from the control layer and apply the selected preset(s) to all layers with the same base name pattern. All animated properties will be offset based on each layer's in-point or out-point.", {multiline: true});
+        infoText.alignment = ["fill", "top"];
+        infoText.preferredSize.width = 400;
+
+        // Buttons group
+        var buttonGroup = win.add("group");
+        buttonGroup.orientation = "row";
+        buttonGroup.alignChildren = ["center", "center"];
+        buttonGroup.alignment = ["center", "bottom"];
+        
+        var applyButton = buttonGroup.add("button", undefined, "Apply Preset(s)");
+        applyButton.preferredSize.width = 120;
+
+        // For non-dockable mode, add a close button
+        if (!(thisObj instanceof Panel)) {
+            var closeButton = buttonGroup.add("button", undefined, "Close");
+            closeButton.preferredSize.width = 120;
+            closeButton.onClick = function() {
+                win.close();
+            };
+        }
+
+        // Event handlers for direct preset selection
+        browseButton.onClick = function() {
+            var presetFile = File.openDialog("Select an Animation Preset", "Animation Presets:*.ffx");
+            if (presetFile) {
+                presetPath.text = presetFile.fsName;
+            }
+        };
+
+        // Event handlers for brand folder selection
+        brandFolderBrowseButton.onClick = function() {
+            var folder = Folder.selectDialog("Select Brands Folder");
+            if (folder) {
+                brandFolderPath.text = folder.fsName;
+                populateBrandDropdown(folder);
+            }
+        };
+        
+        refreshBrandsButton.onClick = function() {
+            if (brandFolderPath.text) {
+                var folder = new Folder(brandFolderPath.text);
+                populateBrandDropdown(folder);
+            } else {
+                alert("Please select a Brands Folder first.");
+            }
+        };
+        
+        brandDropdown.onChange = function() {
+            if (brandDropdown.selection) {
+                populatePresetsList();
+            }
+        };
+
+        applyButton.onClick = function() {
+            applyPresetToLayers();
+        };
+
+        // Function to populate brand dropdown
+        function populateBrandDropdown(brandsFolder) {
+            brandDropdown.removeAll();
+            presetsListBox.removeAll();
+            
+            if (!brandsFolder || !brandsFolder.exists) {
+                alert("The specified Brands Folder does not exist.");
+                return;
+            }
+            
+            var folders = brandsFolder.getFiles(function(file) { 
+                return file instanceof Folder; 
+            });
+            
+            if (folders.length === 0) {
+                alert("No brand folders found in the selected directory.");
+                return;
+            }
+            
+            for (var i = 0; i < folders.length; i++) {
+                var folderName = folders[i].name;
+                brandDropdown.add("item", folderName);
+            }
+            
+            if (brandDropdown.items.length > 0) {
+                brandDropdown.selection = 0;
+                populatePresetsList();
+            }
+        }
+        
+        // Function to populate presets list in the listbox
+        function populatePresetsList() {
+            presetsListBox.removeAll();
+            
+            if (!brandDropdown.selection) return;
+            
+            var brandName = brandDropdown.selection.text;
+            var brandFolderObj = new Folder(brandFolderPath.text + "/" + brandName);
+            
+            if (!brandFolderObj.exists) {
+                alert("Brand folder not found");
+                return;
+            }
+            
+            // Get all .ffx files in the brand folder
+            var presetFiles = brandFolderObj.getFiles("*.ffx");
+            
+            if (presetFiles.length === 0) {
+                presetsListBox.add("item", "No presets found");
+                return;
+            }
+            
+            // Add all presets to the listbox
+            for (var i = 0; i < presetFiles.length; i++) {
+                var item = presetsListBox.add("item", presetFiles[i].name);
+                item.presetFile = presetFiles[i]; // Store the file reference
+            }
+            
+            // Select the first preset by default
+            if (presetsListBox.items.length > 0) {
+                presetsListBox.selection = 0;
+            }
+        }
+
+        // Function to extract base name pattern from a layer name
+        function extractBaseNamePattern(layerName) {
+            // This function attempts to find a pattern in the layer name
+            // For example, "Title 1" would return "Title "
+            var pattern = layerName.replace(/[0-9]+$/, "");
+            return pattern;
+        }
+
+        // Function to apply the preset to layers with matching pattern
+        function applyPresetToLayers() {
+            // Get the preset file(s) based on selection method
+            var presetFiles = [];
+            
+            if (directSelectRadio.value) {
+                // Direct selection method
+                if (!presetPath.text) {
+                    alert("Please select an animation preset.");
+                    return;
+                }
+                
+                var presetFile = new File(presetPath.text);
+                if (!presetFile.exists) {
+                    alert("The selected preset file does not exist.");
+                    return;
+                }
+                
+                presetFiles.push(presetFile);
+            } else {
+                // Brand folder method - multiple presets
+                if (!brandFolderPath.text || !brandDropdown.selection) {
+                    alert("Please select a Brands Folder and a brand.");
+                    return;
+                }
+                
+                // Check for selected presets in the listbox
+                var selectedItems = [];
+                for (var i = 0; i < presetsListBox.items.length; i++) {
+                    if (presetsListBox.items[i].selected) {
+                        selectedItems.push(presetsListBox.items[i]);
+                    }
+                }
+                
+                // If no presets are selected, try to use the current selection
+                if (selectedItems.length === 0 && presetsListBox.selection !== null) {
+                    selectedItems.push(presetsListBox.selection);
+                }
+                
+                if (selectedItems.length === 0) {
+                    alert("Please select at least one preset from the list.");
+                    return;
+                }
+                
+                // Add selected presets to the presetFiles array
+                for (var i = 0; i < selectedItems.length; i++) {
+                    if (selectedItems[i].presetFile && selectedItems[i].presetFile.exists) {
+                        presetFiles.push(selectedItems[i].presetFile);
+                    }
+                }
+                
+                if (presetFiles.length === 0) {
+                    alert("No valid animation presets found.");
+                    return;
+                }
+            }
+            
+            if (!controlLayer) {
+                alert("Please select a control layer using the 'Use Selected Layer' button.");
+                return;
+            }
+            
+            if (!namingPattern.text) {
+                alert("Please specify a base name pattern.");
+                return;
+            }
+            
+            // Get active composition
+            if (!(app.project.activeItem && app.project.activeItem instanceof CompItem)) {
+                alert("Please select a composition.");
+                return;
+            }
+            
+            var comp = app.project.activeItem;
+            var pattern = namingPattern.text;
+            var affectedLayers = [];
+            
+            // Find layers with matching pattern in active comp
+            for (var i = 1; i <= comp.numLayers; i++) {
+                var layer = comp.layer(i);
+                
+                if (layer.name.indexOf(pattern) === 0) {
+                    // Exclude the control layer from affectedLayers entirely
+                    if (controlLayer && layer === controlLayer) {
+                        continue;
+                    }
+                    affectedLayers.push({
+                        layer: layer,
+                        comp: comp
+                    });
+                }
+            }
+            
+            // If nested composition processing is enabled, find layers in nested comps
+            if (processNestedCheckbox.value) {
+                var maxDepth = parseInt(depthInput.text, 10) || 3;
+                var processedComps = {}; // To avoid processing the same comp multiple times
+                processedComps[comp.id] = true; // Mark active comp as processed
+                
+                // Get all composition layers in the active comp
+                var nestedCompLayers = [];
+                for (var i = 1; i <= comp.numLayers; i++) {
+                    var layer = comp.layer(i);
+                    if (layer.source instanceof CompItem) {
+                        nestedCompLayers.push({
+                            layer: layer,
+                            comp: layer.source,
+                            depth: 1
+                        });
+                    }
+                }
+                
+                // Process nested compositions
+                while (nestedCompLayers.length > 0) {
+                    var nestedItem = nestedCompLayers.shift();
+                    var nestedComp = nestedItem.comp;
+                    var currentDepth = nestedItem.depth;
+                    
+                    // Skip if already processed or beyond max depth
+                    if (processedComps[nestedComp.id] || (recursiveCheckbox.value && currentDepth > maxDepth)) {
+                        continue;
+                    }
+                    
+                    processedComps[nestedComp.id] = true;
+                    
+                    // Find layers with matching pattern in this nested comp
+                    for (var j = 1; j <= nestedComp.numLayers; j++) {
+                        var nestedLayer = nestedComp.layer(j);
+                        
+                        if (nestedLayer.name.indexOf(pattern) === 0) {
+                            affectedLayers.push({
+                                layer: nestedLayer,
+                                comp: nestedComp
+                            });
+                        }
+                        
+                        // If recursive processing is enabled, add any comp layers to the queue
+                        if (recursiveCheckbox.value && nestedLayer.source instanceof CompItem && currentDepth < maxDepth) {
+                            nestedCompLayers.push({
+                                layer: nestedLayer,
+                                comp: nestedLayer.source,
+                                depth: currentDepth + 1
+                            });
+                        }
+                    }
+                }
+            }
+            
+            // Begin undo group
+            app.beginUndoGroup("Apply Preset to Layers");
+            
+            try {
+                // Store the initial state of the control layer (in-point and out-point)
+                var controlInPoint = controlLayer.inPoint;
+                var controlOutPoint = controlLayer.outPoint;
+                
+                // Store the original active composition
+                var originalActiveComp = app.project.activeItem;
+                
+                // For each preset, apply it to all affected layers
+                for (var presetIndex = 0; presetIndex < presetFiles.length; presetIndex++) {
+                    var currentPreset = presetFiles[presetIndex];
+                    
+                    // Apply preset to control layer first
+                    controlLayer.selected = true;
+                    if (!applyPresetToLayer(controlLayer, currentPreset)) {
+                        alert("Failed to apply preset " + currentPreset.name + " to the control layer.");
+                        continue; // Try next preset
+                    }
+                    
+                    // Delay to ensure the preset is fully applied
+                    app.project.activeItem.time = app.project.activeItem.time;
+                    
+                    // Get a snapshot of the control layer's property structure and keyframes
+                    var controlSnapshot = captureLayerSnapshot(controlLayer);
+                    
+                    // Apply preset to other layers
+                    var appliedCount = 0;
+                    
+                    for (var i = 0; i < affectedLayers.length; i++) {
+                        var layerInfo = affectedLayers[i];
+                        var layer = layerInfo.layer;
+                        var targetComp = layerInfo.comp;
+                        
+                        // Safeguard check in case control layer slips in
+                        if (controlLayer && layer === controlLayer && targetComp.id === comp.id) {
+                            continue;
+                        }
+                        
+                        // Activate the target composition
+                        if (app.project.activeItem !== targetComp) {
+                            targetComp.openInViewer();
+                        }
+                        
+                        layer.selected = true;
+                        if (applyPresetToLayer(layer, currentPreset)) {
+                            // If we're applying keyframes relative to layer timing
+                            if (relativeTimingCheckbox.value) {
+                                // Use in-point or out-point based on radio button selection
+                                var referencePoint = inPointRadio.value ? controlInPoint : controlOutPoint;
+                                var targetPoint = inPointRadio.value ? layer.inPoint : layer.outPoint;
+                                
+                                applySnapshotWithOffset(layer, controlSnapshot, referencePoint, targetPoint, preserveDurationCheckbox.value);
+                            }
+                            appliedCount++;
+                        }
+                        layer.selected = false;
+                    }
+                    
+                    // We need to reapply all presets to the control layer for next preset 
+                    // to ensure we have a clean state
+                    if (presetIndex < presetFiles.length - 1) {
+                        // Clear all effects/properties from the previous preset
+                        try {
+                            var effectsGroup = controlLayer.property("ADBE Effect Parade");
+                            while (effectsGroup.numProperties > 0) {
+                                var lastEffect = effectsGroup.property(effectsGroup.numProperties);
+                                lastEffect.remove();
+                            }
+                        } catch (e) {
+                            // No effects to remove
+                        }
+                        
+                        // Try to remove any other added properties or reset transformations
+                        // This is a best effort - we can't fully "undo" a preset application
+                    }
+                    
+                    alert("Preset \"" + currentPreset.name + "\" applied to " + appliedCount + " layers with timing adjusted.");
+                }
+                
+                // Restore the original active composition
+                if (originalActiveComp) {
+                    originalActiveComp.openInViewer();
+                }
+                
+            } catch (e) {
+                alert("Error: " + e.toString());
+            } finally {
+                app.endUndoGroup();
+            }
+        }
+
+        // Function to apply preset to a single layer
+        // Modified to clear selection so only the intended layer is selected
+        function applyPresetToLayer(layer, presetFile) {
+            try {
+                var comp = app.project.activeItem;
+                // Clear selection from all layers in the active comp
+                for (var i = 1; i <= comp.numLayers; i++) {
+                    comp.layer(i).selected = false;
+                }
+                layer.selected = true;
+                
+                var script = "var activeComp = app.project.activeItem;\n" +
+                             "var selectedLayers = activeComp.selectedLayers;\n" +
+                             "if (selectedLayers.length > 0) {\n" +
+                             "    var layer = selectedLayers[0];\n" +
+                             "    var presetFile = new File('" + presetFile.fsName.replace(/\\/g, "\\\\") + "');\n" +
+                             "    layer.applyPreset(presetFile);\n" +
+                             "    true;\n" + // return value
+                             "} else {\n" +
+                             "    false;\n" + // return value
+                             "}";
+                
+                return eval(script);
+            } catch (e) {
+                alert("Error applying preset to layer " + layer.name + ": " + e.toString());
+                return false;
+            }
+        }
+        
+        // Comprehensive function to capture all properties and keyframes from a layer
+        function captureLayerSnapshot(layer) {
+            var snapshot = {
+                inPoint: layer.inPoint,
+                outPoint: layer.outPoint,
+                properties: []
+            };
+            
+            // Helper function to recursively traverse and capture properties
+            function capturePropertyTree(prop, path) {
+                if (!prop) return; // Add null check
+                
+                for (var i = 1; i <= prop.numProperties; i++) {
+                    var subProp = prop.property(i);
+                    if (!subProp) continue; // Add null check
+                    
+                    var subPath = path ? path + "." + subProp.matchName : subProp.matchName;
+                    
+                    if (subProp.numProperties > 0) {
+                        // This is a property group, recurse
+                        capturePropertyTree(subProp, subPath);
+                    } else if (subProp.canSetExpression) {
+                        // This is an actual property that might have keyframes
+                        var propData = {
+                            path: subPath,
+                            name: subProp.name,
+                            matchName: subProp.matchName,
+                            parentName: prop.name,
+                            keyframes: [],
+                            hasKeyframes: false
+                        };
+                        
+                        // Capture keyframes if they exist
+                        if (subProp.numKeys > 0) {
+                            propData.hasKeyframes = true;
+                            
+                            for (var j = 1; j <= subProp.numKeys; j++) {
+                                var keyframe = {
+                                    time: subProp.keyTime(j),
+                                    value: subProp.keyValue(j)
+                                };
+                                
+                                // Try to capture keyframe interpolation and other properties
+                                try {
+                                    keyframe.inInterpolationType = subProp.keyInInterpolationType(j);
+                                    keyframe.outInterpolationType = subProp.keyOutInterpolationType(j);
+                                    
+                                    // Capture temporal ease for properties that support it
+                                    if (subProp.value instanceof Array && subProp.value.length > 0) {
+                                        keyframe.temporalEaseIn = subProp.keyInTemporalEase(j);
+                                        keyframe.temporalEaseOut = subProp.keyOutTemporalEase(j);
+                                    }
+                                } catch (e) {
+                                    // Some properties don't support all keyframe attributes
+                                }
+                                
+                                propData.keyframes.push(keyframe);
+                            }
+                        }
+                        
+                        // Add property to snapshot
+                        snapshot.properties.push(propData);
+                    }
+                }
+            }
+            
+            // Start capturing properties
+            capturePropertyTree(layer, "");
+            
+            // Special handling for text animators
+            try {
+                if (layer.property("ADBE Text Properties") && 
+                    layer.property("ADBE Text Properties").property("ADBE Text Animators")) {
+                    var textAnimators = layer.property("ADBE Text Properties").property("ADBE Text Animators");
+                    if (textAnimators) {
+                        capturePropertyTree(textAnimators, "ADBE Text Properties.ADBE Text Animators");
+                    }
+                }
+            } catch (e) {
+                // Handle case where text properties don't exist
+            }
+            
+            return snapshot;
+        }
+        
+        // Function to find a property by path
+        function findPropertyByPath(layer, path) {
+            if (!layer || !path) return null; // Add null check
+            
+            var parts = path.split(".");
+            var current = layer;
+            
+            for (var i = 0; i < parts.length; i++) {
+                if (!current) return null; // Add null check
+                
+                var matchName = parts[i];
+                var found = false;
+                
+                // Try to find property by matchName
+                for (var j = 1; j <= current.numProperties; j++) {
+                    try {
+                        if (current.property(j) && current.property(j).matchName === matchName) {
+                            current = current.property(j);
+                            found = true;
+                            break;
+                        }
+                    } catch (e) {
+                        // Skip if property access fails
+                        continue;
+                    }
+                }
+                
+                if (!found) {
+                    // If not found by matchName, try by name or index
+                    try {
+                        current = current.property(matchName);
+                        found = true;
+                    } catch (e) {
+                        // Not found by name or matchName
+                        return null;
+                    }
+                }
+            }
+            
+            return current;
+        }
+        
+        // Modified function to apply snapshot data with offset based on in-point
+        
+        // Function to apply snapshot data with offset based on in-point or out-point
+        function applySnapshotWithOffset(layer, snapshot, sourceReferencePoint, targetReferencePoint, preserveDuration) {
+            try {
+                // Calculate time offset between control layer and target layer
+                var timeOffset = targetReferencePoint - sourceReferencePoint;
+                
+                // Duration scaling factor (if preserving duration)
+                var durationScale = 1;
+                if (preserveDuration) {
+                    var sourceLayerDuration = snapshot.outPoint - snapshot.inPoint;
+                    var targetLayerDuration = layer.outPoint - layer.inPoint;
+                    
+                    if (sourceLayerDuration > 0 && targetLayerDuration > 0) {
+                        durationScale = targetLayerDuration / sourceLayerDuration;
+                    }
+                }
+                
+                // Apply each keyframed property from the snapshot
+                for (var i = 0; i < snapshot.properties.length; i++) {
+                    var propData = snapshot.properties[i];
+                    
+                    if (!propData.hasKeyframes) continue;
+                    
+                    // Find the matching property in the target layer
+                    var targetProp = findPropertyByPath(layer, propData.path);
+                    if (!targetProp) {
+                        // Try to find by name if path lookup fails
+                        try {
+                            // Common property groups to search
+                            var groups = [
+                                layer.property("ADBE Effect Parade"),
+                                layer.property("ADBE Transform Group"),
+                                layer.property("ADBE Text Properties")
+                            ];
+                            
+                            for (var g = 0; g < groups.length; g++) {
+                                if (!groups[g]) continue;
+                                
+                                for (var p = 1; p <= groups[g].numProperties; p++) {
+                                    if (groups[g].property(p) && 
+                                        groups[g].property(p).name === propData.name) {
+                                        targetProp = groups[g].property(p);
+                                        break;
+                                    }
+                                }
+                                
+                                if (targetProp) break;
+                            }
+                        } catch (e) {
+                            // Skip if not found
+                            continue;
+                        }
+                    }
+                    
+                    if (!targetProp || !targetProp.canSetExpression) continue;
+                    
+                    // Remove existing keyframes
+                    while (targetProp.numKeys > 0) {
+                        targetProp.removeKey(1);
+                    }
+                    
+                    // Apply new keyframes with offset
+                    for (var j = 0; j < propData.keyframes.length; j++) {
+                        var keyframe = propData.keyframes[j];
+                        
+                        // Calculate adjusted time
+                        var adjustedTime;
+                        if (preserveDuration) {
+                            // Scale time relative to reference point
+                            var timeDiff = keyframe.time - sourceReferencePoint;
+                            adjustedTime = targetReferencePoint + (timeDiff * durationScale);
+                        } else {
+                            // Simple offset
+                            adjustedTime = keyframe.time + timeOffset;
+                        }
+                        
+                        // Add keyframe at adjusted time
+                        var keyIndex = targetProp.addKey(adjustedTime);
+                        
+                        try {
+                            // Set keyframe value
+                            targetProp.setValueAtKey(keyIndex, keyframe.value);
+                            
+                            // Try to set interpolation type if available
+                            if (keyframe.inInterpolationType !== undefined) {
+                                targetProp.setTemporalEaseAtKey(keyIndex, keyframe.temporalEaseIn, keyframe.temporalEaseOut);
+                                targetProp.setInterpolationTypeAtKey(keyIndex, keyframe.inInterpolationType, keyframe.outInterpolationType);
+                            }
+                        } catch (e) {
+                            // Some properties don't support all keyframe attributes
+                        }
+                    }
+                }
+            } catch (e) {
+                alert("Error applying snapshot to layer " + layer.name + ": " + e.toString());
+            }
+        }
+
+        // Show the UI
+        if (!(thisObj instanceof Panel)) {
+            win.center();
+            win.show();
+        } else {
+            win.layout.layout(true);
+            win.layout.resize();
+        }
+    }
+
+    // Wrapper to handle UI building with persistent settings
+    function showUI(thisObj) {
+        try {
+            // Load saved settings from ScriptUI preferences
+            var scriptName = "Preset Distributor";
+            var settings = getScriptSettings(scriptName);
+            
+            // Build the UI
+            var ui = buildUI(thisObj);
+            
+            // Apply saved settings if available
+            if (settings) {
+                try {
+                    if (settings.presetPath) ui.presetPath.text = settings.presetPath;
+                    if (settings.brandFolderPath) ui.brandFolderPath.text = settings.brandFolderPath;
+                    if (settings.namingPattern) ui.namingPattern.text = settings.namingPattern;
+                    if (settings.maxDepth) ui.depthInput.text = settings.maxDepth;
+                    
+                    // Select radio buttons based on settings
+                    if (settings.useDirectPreset !== undefined) {
+                        ui.directSelectRadio.value = settings.useDirectPreset;
+                        ui.brandFolderRadio.value = !settings.useDirectPreset;
+                        
+                        // Enable/disable appropriate groups
+                        ui.presetGroup.enabled = settings.useDirectPreset;
+                        ui.brandFolderGroup.enabled = !settings.useDirectPreset;
+                    }
+                    
+                    if (settings.useInPoint !== undefined) {
+                        ui.inPointRadio.value = settings.useInPoint;
+                        ui.outPointRadio.value = !settings.useInPoint;
+                    }
+                    
+                    if (settings.relativeTimingEnabled !== undefined) {
+                        ui.relativeTimingCheckbox.value = settings.relativeTimingEnabled;
+                    }
+                    
+                    if (settings.preserveDurationEnabled !== undefined) {
+                        ui.preserveDurationCheckbox.value = settings.preserveDurationEnabled;
+                    }
+                    
+                    if (settings.processNestedEnabled !== undefined) {
+                        ui.processNestedCheckbox.value = settings.processNestedEnabled;
+                    }
+                    
+                    if (settings.recursiveEnabled !== undefined) {
+                        ui.recursiveCheckbox.value = settings.recursiveEnabled;
+                        ui.depthPanel.enabled = settings.recursiveEnabled;
+                    }
+                    
+                    // Populate brand dropdown if path exists
+                    if (settings.brandFolderPath) {
+                        var folder = new Folder(settings.brandFolderPath);
+                        if (folder.exists) {
+                            populateBrandDropdown(folder);
+                            
+                            // Try to select the previously selected brand
+                            if (settings.selectedBrand) {
+                                for (var i = 0; i < ui.brandDropdown.items.length; i++) {
+                                    if (ui.brandDropdown.items[i].text === settings.selectedBrand) {
+                                        ui.brandDropdown.selection = i;
+                                        populatePresetsList();
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (e) {
+                    // If error loading settings, just continue with defaults
+                }
+            }
+            
+            // Save settings when UI closes
+            if (!(thisObj instanceof Panel)) {
+                ui.onClose = function() {
+                    saveScriptSettings(ui, scriptName);
+                };
+            }
+            
+            return ui;
+        } catch (e) {
+            alert("Error creating UI: " + e.toString());
+        }
+    }
+    
+    // Helper function to save script settings
+    function saveScriptSettings(ui, scriptName) {
+        try {
+            if (!app.settings.haveSetting(scriptName, "settings")) {
+                app.settings.saveSetting(scriptName, "settings", "{}");
+            }
+            
+            var settings = {
+                presetPath: ui.presetPath.text,
+                brandFolderPath: ui.brandFolderPath.text,
+                namingPattern: ui.namingPattern.text,
+                useDirectPreset: ui.directSelectRadio.value,
+                useInPoint: ui.inPointRadio.value,
+                relativeTimingEnabled: ui.relativeTimingCheckbox.value,
+                preserveDurationEnabled: ui.preserveDurationCheckbox.value,
+                processNestedEnabled: ui.processNestedCheckbox.value,
+                recursiveEnabled: ui.recursiveCheckbox.value,
+                maxDepth: ui.depthInput.text
+            };
+            
+            // Save selected brand if available
+            if (ui.brandDropdown.selection) {
+                settings.selectedBrand = ui.brandDropdown.selection.text;
+            }
+            
+            app.settings.saveSetting(scriptName, "settings", JSON.stringify(settings));
+        } catch (e) {
+            // Silent fail on settings save
+        }
+    }
+    
+    // Helper function to load script settings
+    function getScriptSettings(scriptName) {
+        try {
+            if (app.settings.haveSetting(scriptName, "settings")) {
+                var settingsJson = app.settings.getSetting(scriptName, "settings");
+                return JSON.parse(settingsJson);
+            }
+        } catch (e) {
+            // Silent fail on settings load
+        }
+        return null;
+    }
+    
+    // Execute the script
+    if (parseFloat(app.version) >= 13.0) { // CS6 and above
+        showUI(thisObj);
+    } else {
+        alert("This script requires Adobe After Effects CS6 or later.");
+    }
+
+})(this);
